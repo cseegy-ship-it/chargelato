@@ -16,8 +16,21 @@ DEFAULT_LAT = 52.48671
 DEFAULT_LON = 13.35544
 
 # Search settings
-CHARGER_RADIUS_KM = 5           # radius for charger lookup
+DEFAULT_CHARGER_RADIUS_KM = 5           # radius for charger lookup
+ICE_MODE_CHARGER_RADIUS_KM = 7.5        # 50% larger search radius
+CHARGER_RADIUS_KM = DEFAULT_CHARGER_RADIUS_KM
 MAX_CHARGERS = 15               # cap number of chargers processed
+
+# ice cream matching thresholds (meters)
+DEFAULT_ICE_CREAM_RADIUS_M = 250
+MIN_ICE_CREAM_RADIUS_M = 50
+MAX_ICE_CREAM_RADIUS_M = 1000
+ICE_CREAM_MATCH_RADIUS_M = DEFAULT_ICE_CREAM_RADIUS_M
+
+# Overpass search radius for ice cream POIs (meters)
+ICECREAM_SEARCH_RADIUS_M = 3000
+
+OVERPASS_TIMEOUT_SECONDS = 25
 
 # API endpoints
 NOMINATIM_URL = "https://nominatim.openstreetmap.org/search"
