@@ -1,18 +1,17 @@
 """
 EV Charging Stations service for the EV Charging Finder application.
 
-This module provides functionality to retrieve nearby EV charging stations
-from the Open Charge Map API and parse the response data.
+Fetches nearby EV charging stations from the Open Charge Map API.
+Implements caching to reduce redundant requests.
 
-The Open Charge Map API is queried based on a user's geographic coordinates and a 
-specified search radius to find relevant charging stations for display on the map.
-
-Functions in this module handle API communication and data extraction,
-ensuring robust handling of missing or incomplete data.
+Functions:
+- get_chargers(lat, lon, radius_km) → list of normalized charger dicts
 """
 
-import requests
 import time
+from typing import Optional
+
+import requests
 
 from config import (
     CHARGER_RADIUS_KM,
@@ -24,25 +23,58 @@ from config import (
     CACHE_TTL_SECONDS,
 )
 
-# internal cache to reduce redundant Open Charge Map requests
-_cache = {}  # key -> (result, timestamp)
+# Internal cache: (lat, lon, radius) → (chargers_list, timestamp)
+_CACHE: dict = {}
 
 
-def get_chargers(lat, lon, radius_km=CHARGER_RADIUS_KM):
+def _extract_connection_info(connections: list) -> tuple[Optional[float], str]:
+    """Extract power and plug type from first connection in list.
+
+    Args:
+        connections: List of connection dicts from OCM API
+
+    Returns:
+        (power_kw, plug_type): Power in kW and plug type string
     """
-    Return a limited list of nearby chargers using Open Charge Map API.
+    if not connections:
+        return None, "Unknown"
 
-    Caches results briefly to avoid hitting API rate limits. The
-    returned list is truncated to MAX_CHARGERS to keep rendering fast.
+    conn = connections[0]
+    power = conn.get("PowerKW")
+    conn_type = conn.get("ConnectionType", {})
+    plug = (
+        conn_type.get("Title", "Unknown")
+        if isinstance(conn_type, dict)
+        else "Unknown"
+    )
+
+    return power, plug
+
+
+def get_chargers(lat: float, lon: float, radius_km: float = CHARGER_RADIUS_KM) -> list:
+    """Fetch nearby EV charging stations from Open Charge Map API.
+
+    Results are cached briefly to avoid hitting rate limits. Returns a list
+    capped at MAX_CHARGERS for performance.
+
+    Args:
+        lat: Latitude coordinate
+        lon: Longitude coordinate
+        radius_km: Search radius in kilometers
+
+    Returns:
+        List of charger dicts with keys: name, lat, lon, power, plug
     """
-    key = (round(lat, 5), round(lon, 5), radius_km)
+    # Check cache
+    cache_key = (round(lat, 5), round(lon, 5), radius_km)
     now = time.time()
-    if key in _cache:
-        result, ts = _cache[key]
-        if now - ts < CACHE_TTL_SECONDS:
-            return result
 
-    print(f"🔎 Fetching chargers near: {lat}, {lon}")
+    if cache_key in _CACHE:
+        chargers, timestamp = _CACHE[cache_key]
+        if now - timestamp < CACHE_TTL_SECONDS:
+            return chargers
+
+    print(f"⚡ Fetching chargers near: {lat}, {lon}")
     chargers = []
 
     params = {
@@ -57,7 +89,9 @@ def get_chargers(lat, lon, radius_km=CHARGER_RADIUS_KM):
     }
 
     try:
-        resp = requests.get(OPEN_CHARGE_MAP_URL, params=params, timeout=REQUEST_TIMEOUT)
+        resp = requests.get(
+            OPEN_CHARGE_MAP_URL, params=params, timeout=REQUEST_TIMEOUT
+        )
         if resp.status_code != 200:
             print("⚠️  Open Charge Map API request failed")
             return []
@@ -75,20 +109,10 @@ def get_chargers(lat, lon, radius_km=CHARGER_RADIUS_KM):
             if not lat_e or not lon_e:
                 continue
 
-            # Extract power and plug info from first connection
-            power = None
-            plug = "Unknown"
-            connections = poi.get("Connections", [])
-            
-            if connections:
-                connection = connections[0]
-                power = connection.get("PowerKW")
-                conn_type = connection.get("ConnectionType", {})
-                plug = conn_type.get("Title", "Unknown") if isinstance(conn_type, dict) else "Unknown"
+            power, plug = _extract_connection_info(poi.get("Connections", []))
 
             print(f"🔎 Station: {name}")
-            print(f"🔌 Connector: {plug}")
-            print(f"⚡ Power: {power}")
+            print(f"🔌 Connector: {plug} | ⚡ Power: {power}")
 
             charger_entry = {
                 "name": name,
@@ -99,10 +123,10 @@ def get_chargers(lat, lon, radius_km=CHARGER_RADIUS_KM):
             }
             chargers.append(charger_entry)
 
-    except requests.RequestException:
-        print("⚠️  Open Charge Map API request failed")
+    except requests.RequestException as e:
+        print(f"⚠️  Open Charge Map request failed: {e}")
         return []
 
     print(f"⚡ Chargers returned: {len(chargers)}")
-    _cache[key] = (chargers, now)
+    _CACHE[cache_key] = (chargers, now)
     return chargers
