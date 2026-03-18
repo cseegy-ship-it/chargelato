@@ -129,14 +129,17 @@ def _render_terminal(code: str) -> None:
     st.markdown(_format_code_block(code), unsafe_allow_html=True)
 
 
-def build_ocpi_call(charger: dict) -> tuple[str, dict]:
+def build_ocpi_call(charger: dict, country_code: str = "DE") -> tuple[str, dict]:
     """Build a simulated OCPI GET request and its JSON response.
+
+    Generates realistic OCPI API flow with comments simulating backend logs.
 
     Args:
         charger: Charger dictionary with keys: name, plug, power, lat, lon
+        country_code: ISO country code (e.g., "DE", "GB")
 
     Returns:
-        (request_text, response_json): HTTP request string and response dict
+        (request_text, response_json): HTTP request string with comments and response dict
     """
     name = charger.get("name", "")
     plug = charger.get("plug")
@@ -147,10 +150,14 @@ def build_ocpi_call(charger: dict) -> tuple[str, dict]:
     location_id = _slugify_name(name)
     location_id = f"LOC-{location_id}" if location_id else "LOC-UNKNOWN"
 
-    # Build request line
-    request_url = f"https://api.partner-network.com/ocpi/2.2.1/locations/DE/ABC/{location_id}"
+    # Build request with developer comments (simulating backend logs)
     auth_token = "VIRTATOKEN-9f3a2c7e-4b8d-11ec-81d3-0242ac130003"
+    request_url = f"https://api.partner-network.com/ocpi/2.2.1/locations/{country_code}/ABC/{location_id}"
+
     request_text = (
+        "# Identify charger operator and route request to partner network\n"
+        "# Request charger data via OCPI (platform-to-platform communication)\n"
+        "\n"
         f"GET {request_url}\n"
         f"Authorization: Token {auth_token}\n"
         "Content-Type: application/json"
@@ -168,7 +175,7 @@ def build_ocpi_call(charger: dict) -> tuple[str, dict]:
             {
                 "id": location_id,
                 "name": name,
-                "country_code": "DE",
+                "country_code": country_code,
                 "party_id": "ABC",
                 "evses": [
                     {
@@ -189,20 +196,22 @@ def build_ocpi_call(charger: dict) -> tuple[str, dict]:
     return request_text, response
 
 
-def _get_clicked_charger(chargers: list[dict], click: dict) -> Optional[dict]:
-    """Match a clicked map point to a charger.
+def _get_clicked_charger(chargers: list[dict], ice_pois: list[dict], click: dict) -> Optional[dict]:
+    """Match a clicked map point to a charger (ignoring ice cream markers).
 
     Folium returns lat/lon of the last clicked object. This matches it to
     the closest charger in the list (within tolerance, or nearest if no exact match).
+    Ice cream POIs are ignored.
 
     Args:
         chargers: List of charger dictionaries
+        ice_pois: List of ice cream POI dictionaries
         click: Click event data from folium (contains lat, lon, etc.)
 
     Returns:
-        Matched charger dict, or None if no chargers or invalid click data
+        Matched charger dict with type="charger", or None if ice cream clicked or no match
     """
-    if not (click and chargers):
+    if not click:
         return None
 
     lat = click.get("lat") or click.get("latitude")
@@ -210,20 +219,31 @@ def _get_clicked_charger(chargers: list[dict], click: dict) -> Optional[dict]:
     if lat is None or lon is None:
         return None
 
-    # Try exact match with tolerance for floating point
-    tol = 1e-4
-    for ch in chargers:
-        if ch.get("lat") is None or ch.get("lon") is None:
-            continue
-        if abs(ch["lat"] - lat) < tol and abs(ch["lon"] - lon) < tol:
-            return ch
+    # Build a combined list of all POIs with type metadata
+    all_pois = [
+        {**ch, "marker_type": "charger"}
+        for ch in (chargers or [])
+    ] + [
+        {**ic, "marker_type": "icecream"}
+        for ic in (ice_pois or [])
+    ]
 
-    # Fall back to nearest charger
-    closest = min(
-        chargers,
-        key=lambda c: (c.get("lat", 0) - lat) ** 2 + (c.get("lon", 0) - lon) ** 2,
+    if not all_pois:
+        return None
+
+    # Find closest POI by distance
+    closest_poi = min(
+        all_pois,
+        key=lambda p: (p.get("lat", 0) - lat) ** 2 + (p.get("lon", 0) - lon) ** 2,
     )
-    return closest
+
+    # Only return if it's a charger (ignore ice cream clicks)
+    if closest_poi.get("marker_type") == "charger":
+        # Remove the metadata field before returning
+        closest_poi.pop("marker_type", None)
+        return closest_poi
+
+    return None
 
 
 def _init_ocpi_session_state() -> None:
@@ -234,6 +254,8 @@ def _init_ocpi_session_state() -> None:
         st.session_state.ocpi_phase = None
     if "ocpi_start_time" not in st.session_state:
         st.session_state.ocpi_start_time = None
+    if "ocpi_country_code" not in st.session_state:
+        st.session_state.ocpi_country_code = "DE"
 
 
 def _init_ice_query_session_state() -> None:
@@ -241,6 +263,13 @@ def _init_ice_query_session_state() -> None:
     if "last_ice_query" not in st.session_state:
         st.session_state.last_ice_query = None
         st.session_state.ice_pois = []
+
+
+def _init_geocoding_session_state() -> None:
+    """Initialize geocoding cache in Streamlit session."""
+    if "last_place" not in st.session_state:
+        st.session_state.last_place = None
+        st.session_state.last_coordinates = None
 
 
 
@@ -265,8 +294,23 @@ with col2:
     )
 
 # --- Lookup Data ---------------------------------------------------------------
-# Geocode location
-lat, lon = get_coordinates(place)
+# Initialize geocoding cache
+_init_geocoding_session_state()
+
+# Geocode location only when search input changes (minimize API calls)
+lat, lon, country_code = DEFAULT_LAT, DEFAULT_LON, "DE"
+if place and place != st.session_state.last_place:
+    # New search place, geocode it
+    lat, lon, country_code = get_coordinates(place)
+    st.session_state.last_place = place
+    st.session_state.last_coordinates = (lat, lon, country_code)
+elif st.session_state.last_coordinates:
+    # Use cached coordinates
+    lat, lon, country_code = st.session_state.last_coordinates
+elif not place:
+    # Clear cache when search is empty
+    st.session_state.last_place = None
+    st.session_state.last_coordinates = None
 
 # Determine charger search radius
 radius = (
@@ -308,10 +352,13 @@ map_data = st_folium(m, use_container_width=True, height=600)
 # --- OCPI Simulation -----------------------------------------------------------
 _init_ocpi_session_state()
 
+# Store current country code in session
+st.session_state.ocpi_country_code = country_code
+
 # Detect charger clicks and start simulation
 if map_data and map_data.get("last_object_clicked"):
     clicked = map_data["last_object_clicked"]
-    clicked_charger = _get_clicked_charger(chargers, clicked)
+    clicked_charger = _get_clicked_charger(chargers, ice_pois, clicked)
 
     if clicked_charger:
         previous = st.session_state.selected_charger
@@ -328,7 +375,7 @@ if map_data and map_data.get("last_object_clicked"):
 
 # Render OCPI simulation if charger is selected
 selected = st.session_state.get("selected_charger")
-if selected:
+if selected and selected.get("name"):  # Safety check: must have charger name
     now = time.time()
     start = st.session_state.get("ocpi_start_time") or now
     elapsed = now - start
@@ -342,7 +389,10 @@ if selected:
         phase = "response"
 
     st.session_state.ocpi_phase = phase
-    request_text, response = build_ocpi_call(selected)
+
+    # Get OCPI request/response with current country code
+    country_for_ocpi = st.session_state.get("ocpi_country_code", "DE")
+    request_text, response = build_ocpi_call(selected, country_for_ocpi)
 
     # Display header and terminal
     st.markdown("### ⚡ OCPI API Call Simulation")
@@ -350,7 +400,7 @@ if selected:
     if phase == "request":
         _render_terminal(request_text)
     elif phase == "loading":
-        # Render loading message with yellow styling (no line numbers needed)
+        # Render loading message with improved wording and comments
         st.markdown(
             """
             <div style="
@@ -361,13 +411,21 @@ if selected:
                 font-family: 'Courier New', monospace;
                 font-size: 14px;
             ">
-            Fetching data from OCPI...
+            # Waiting for response from partner platform<br/>
+            Requesting charger data from partner network via OCPI...
             </div>
             """,
             unsafe_allow_html=True,
         )
     else:
-        _render_terminal(json.dumps(response, indent=2))
+        # Render response with developer comments
+        response_with_comments = (
+            "# Received response from partner network\n"
+            "# Data includes charger availability and connector details\n"
+            "\n"
+            + json.dumps(response, indent=2)
+        )
+        _render_terminal(response_with_comments)
 
     # Continue animation until response phase ends
     if elapsed < 7:
